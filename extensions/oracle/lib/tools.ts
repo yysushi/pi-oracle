@@ -902,7 +902,7 @@ export function registerOracleTools(pi: ExtensionAPI, workerPath: string, authWo
         const jobId = randomUUID();
         const archivePlan = resolveOracleProviderArchivePlan(selection.provider);
         const tempArchivePath = join(tmpdir(), `oracle-archive-${jobId}.${archivePlan.archiveExtension}`);
-        const runtime = allocateRuntime(config);
+        const runtime = allocateRuntime(config, selection.provider);
         let job: OracleJob | undefined;
         let archive: ArchiveCreationResult | undefined;
         let queued = false;

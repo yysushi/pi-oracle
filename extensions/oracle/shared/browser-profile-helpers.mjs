@@ -294,6 +294,14 @@ export function knownBrowserUserDataPathMatchDetails(pathValue, options = {}) {
  * @param {BrowserPathOptions & { platform?: OraclePlatform; includeUnsupported?: boolean; extraProtectedPaths?: string[]; cookieSources?: { chromeProfile?: string; chromeCookiePath?: string } }} [options]
  * @returns {void}
  */
+// Persistent runtimes (allocateRuntime in lib/runtime.ts) reuse one browser
+// profile across jobs; their profile dir must survive job cleanup so cookie
+// continuity and site reputation accumulate instead of resetting every job.
+export function isPersistentRuntimeProfile(runtimeId, runtimeProfileDir) {
+  if (typeof runtimeId === "string" && runtimeId.startsWith("persistent-")) return true;
+  return typeof runtimeProfileDir === "string" && runtimeProfileDir.split("/").pop()?.startsWith("persistent-") === true;
+}
+
 export function assertNotKnownBrowserUserDataPath(pathValue, label, options = {}) {
   const match = knownBrowserUserDataPathMatchDetails(pathValue, options);
   if (!match) return;

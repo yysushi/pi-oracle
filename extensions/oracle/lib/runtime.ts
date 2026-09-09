@@ -3,13 +3,12 @@
 // Scope: Extension-side runtime coordination only; shared concurrency/process primitives live in extensions/oracle/shared.
 // Usage: Imported by jobs, tools, and queue logic to provision or tear down isolated oracle browser runtimes.
 // Invariants/Assumptions: Lease metadata is the admission source of truth, tracked worker identity checks defend against PID reuse, and runtime cleanup always attempts lease release.
-import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants, existsSync, realpathSync, readFileSync } from "node:fs";
 import { access, cp as copyDirectory, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { delimiter, dirname, join } from "node:path";
+import { basename, delimiter, dirname, join } from "node:path";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
-import { assertNotKnownBrowserUserDataPath, sweetCookieSafeStoragePasswordScrubbedEnv } from "../shared/browser-profile-helpers.mjs";
+import { assertNotKnownBrowserUserDataPath, isPersistentRuntimeProfile, sweetCookieSafeStoragePasswordScrubbedEnv } from "../shared/browser-profile-helpers.mjs";
 import { jobBlocksAdmission } from "../shared/job-coordination-helpers.mjs";
 import { isTrackedProcessAlive } from "../shared/process-helpers.mjs";
 import type { OracleConfig, OracleProvider } from "./config.js";
@@ -148,8 +147,14 @@ export function parseConversationId(chatUrl: string | undefined): string | undef
   }
 }
 
-export function allocateRuntime(config: OracleConfig): { runtimeId: string; runtimeSessionName: string; runtimeProfileDir: string } {
-  const runtimeId = randomUUID();
+export function allocateRuntime(config: OracleConfig, providerKey: string): { runtimeId: string; runtimeSessionName: string; runtimeProfileDir: string } {
+  // Persistent per-provider runtime: one browser profile reused across jobs.
+  // A fresh profile per job presents ported Cloudflare cookies that were
+  // earned by a different browser fingerprint, which reads as stolen cookies
+  // and trips managed challenges. A reused profile keeps its own cookie
+  // continuity like a real browser. Jobs sharing a runtime serialize on the
+  // runtime lease (see tryAcquireRuntimeLease).
+  const runtimeId = `persistent-${providerKey.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}`;
   return {
     runtimeId,
     runtimeSessionName: `${config.browser.sessionPrefix}-${runtimeId}`,
@@ -393,6 +398,17 @@ async function collectLiveRuntimeLeases(): Promise<OracleRuntimeLeaseMetadata[]>
 
 export async function tryAcquireRuntimeLease(config: OracleConfig, metadata: OracleRuntimeLeaseMetadata): Promise<OracleRuntimeLeaseAttempt> {
   const liveLeases = await collectLiveRuntimeLeases();
+  // Persistent runtimes are shared between jobs: never admit a second job
+  // onto a runtime whose lease is still live (two Chromium instances cannot
+  // share one profile dir).
+  const sameRuntime = liveLeases.find((lease) => lease.runtimeId === metadata.runtimeId);
+  if (sameRuntime) {
+    return {
+      acquired: false,
+      liveLeases,
+      blocker: sameRuntime,
+    };
+  }
   if (liveLeases.length >= config.browser.maxConcurrentJobs) {
     return {
       acquired: false,
@@ -580,6 +596,8 @@ async function closeRuntimeBrowserSession(runtimeSessionName: string): Promise<s
   });
 }
 
+// isPersistentRuntimeProfile lives in shared/browser-profile-helpers.mjs.
+
 export async function cleanupRuntimeArtifacts(runtime: {
   runtimeId?: string;
   runtimeProfileDir?: string;
@@ -593,7 +611,7 @@ export async function cleanupRuntimeArtifacts(runtime: {
     const warning = await closeRuntimeBrowserSession(runtime.runtimeSessionName).catch((error: Error) => error.message);
     if (warning) report.warnings.push(warning);
   }
-  if (runtime.runtimeProfileDir) {
+  if (runtime.runtimeProfileDir && !isPersistentRuntimeProfile(runtime.runtimeId, runtime.runtimeProfileDir)) {
     report.attempted.push("runtimeProfileDir");
     try {
       assertSafeOracleProfilePath(runtime.runtimeProfileDir, "runtime profile");

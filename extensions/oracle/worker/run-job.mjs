@@ -302,6 +302,19 @@ async function cloneSeedProfileToRuntime(job) {
   const seedGenerationPath = join(seedDir, SEED_GENERATION_FILE);
   const seedGeneration = existsSync(seedGenerationPath) ? (await readFile(seedGenerationPath, "utf8")).trim() || undefined : undefined;
 
+  // Persistent runtime profile: reuse it across jobs to keep cookie
+  // continuity (the whole point). Re-clone only when the profile is missing
+  // or the seed generation moved (/oracle-auth refreshed the seed).
+  const runtimeGenerationPath = join(job.runtimeProfileDir, SEED_GENERATION_FILE);
+  const runtimeGeneration = existsSync(runtimeGenerationPath) ? (await readFile(runtimeGenerationPath, "utf8")).trim() || undefined : undefined;
+  if (existsSync(job.runtimeProfileDir) && runtimeGeneration !== undefined && runtimeGeneration === seedGeneration) {
+    await withLock(ORACLE_STATE_DIR, "auth", "global", { jobId: job.id, processPid: process.pid, action: "reusePersistentRuntime" }, async () => {
+      await removeChromiumProcessSingletonArtifacts(job.runtimeProfileDir);
+    }, 10 * 60 * 1000);
+    await log(`Reusing persistent runtime profile (seed generation ${seedGeneration})`);
+    return seedGeneration;
+  }
+
   await withLock(ORACLE_STATE_DIR, "auth", "global", { jobId: job.id, processPid: process.pid, action: "cloneSeedProfile" }, async () => {
     await rm(job.runtimeProfileDir, { recursive: true, force: true }).catch(() => undefined);
     await ensurePrivateDir(dirname(job.runtimeProfileDir));
@@ -318,6 +331,7 @@ async function cloneSeedProfileToRuntime(job) {
       await copyDirectory(seedDir, job.runtimeProfileDir, { recursive: true, force: true, verbatimSymlinks: true });
     }
     await removeChromiumProcessSingletonArtifacts(job.runtimeProfileDir);
+    await writeFile(runtimeGenerationPath, `${seedGeneration ?? ""}\n`, { encoding: "utf-8", mode: 0o600 }).catch(() => undefined);
   }, 10 * 60 * 1000);
 
   return seedGeneration;
@@ -335,7 +349,7 @@ async function cleanupRuntime(job) {
       warnings.push(message);
       await log(message).catch(() => undefined);
     });
-    if (browserClosed) {
+    if (browserClosed && !isPersistentRuntimeProfile(job.runtimeId, job.runtimeProfileDir)) {
       try {
         assertSafeRuntimeProfilePath(job.runtimeProfileDir, "runtime profile", job.config);
         await rm(job.runtimeProfileDir, { recursive: true, force: true });

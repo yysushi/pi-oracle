@@ -55,6 +55,11 @@ export function knownBrowserUserDataPathMatchDetails(
     cookieSources?: { chromeProfile?: string; chromeCookiePath?: string };
   },
 ): KnownBrowserUserDataPathMatchDetails | undefined;
+export function isPersistentRuntimeProfile(
+  runtimeId: string | undefined,
+  runtimeProfileDir: string | undefined,
+): boolean;
+
 export function assertNotKnownBrowserUserDataPath(
   pathValue: string,
   label: string,
