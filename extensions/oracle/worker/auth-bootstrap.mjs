@@ -413,7 +413,9 @@ function toAsyncJsonScript(expression) {
 
 async function openUrl(url, label = url) {
   await log(`Opening URL ${url}`);
-  await targetCommand("open", url, { logLabel: `open ${label}` });
+  // Non-fatal: agent-browser's open readiness gate can time out on chatgpt.com
+  // even though navigation succeeds; callers verify page state afterwards.
+  await targetCommand("open", url, { logLabel: `open ${label}`, allowFailure: true });
 }
 
 async function getUrl() {

@@ -690,7 +690,10 @@ async function launchBrowser(job, url) {
   const endpoint = await waitForDevToolsEndpoint(job);
   await log(`Connecting agent-browser session ${job.runtimeSessionName} to isolated Chrome DevTools endpoint`);
   await spawnCommand(AGENT_BROWSER_BIN, [...browserBaseArgs(job), "connect", endpoint]);
-  await spawnCommand(AGENT_BROWSER_BIN, [...browserBaseArgs(job), "open", url]);
+  // Non-fatal: agent-browser's open readiness gate can time out on chatgpt.com
+  // (persistent background connections), but navigation still happens.
+  // waitForOracleReady classifies actual page state right after this.
+  await spawnCommand(AGENT_BROWSER_BIN, [...browserBaseArgs(job), "open", url], { allowFailure: true });
   browserStarted = true;
 }
 
@@ -2180,7 +2183,9 @@ async function waitForStableArtifactCandidates(job, responseIndex, responseText 
 async function reopenConversationForArtifacts(job, responseIndex, responseText, reason) {
   const targetUrl = job.chatUrl || stripUrlQueryAndHash(await currentUrl(job));
   await log(`Reopening conversation before artifact capture (${reason}): ${targetUrl}`);
-  await agentBrowser(job, "open", targetUrl);
+  // Non-fatal for the same readiness-gate reason as launchBrowser; the
+  // stable-artifact wait below performs the real readiness checking.
+  await agentBrowser(job, "open", targetUrl, { allowFailure: true });
   await agentBrowser(job, "wait", "1500");
   return waitForStableArtifactCandidates(job, responseIndex, responseText);
 }
