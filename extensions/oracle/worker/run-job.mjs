@@ -1060,12 +1060,13 @@ function classifyChatPage({ job, url, snapshot, body, probe }) {
     /captcha|turnstile|hcaptcha/i,
     /unusual activity detected/i,
     /we detect suspicious activity/i,
+    /enable javascript and cookies to continue/i,
   ];
-  if (challengePatterns.some((pattern) => pattern.test(text))) {
-    if (/verification successful|waiting for chatgpt\.com to respond/i.test(text)) {
+  if (managedChallenge || challengePatterns.some((pattern) => pattern.test(text))) {
+    if (!managedChallenge && /verification successful|waiting for chatgpt\.com to respond/i.test(text)) {
       return { state: "unknown", message: "ChatGPT verification is still settling." };
     }
-    return { state: "challenge_blocking", message: "ChatGPT is showing a challenge/verification page" };
+    return { state: "challenge_blocking", message: "ChatGPT is showing a challenge/verification page (likely Cloudflare). Cool down and retry later, or refresh cookies via /oracle-auth." };
   }
 
   const outageText = detectProviderTransientErrorText(text);
