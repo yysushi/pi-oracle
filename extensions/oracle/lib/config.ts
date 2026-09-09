@@ -264,6 +264,8 @@ export interface OracleConfig {
     provider: OracleProvider;
     preset: OracleSubmitPresetId;
     grokMode: OracleGrokMode;
+    chatgptModel?: "sol" | "5.5";
+    chatgptEffort?: "instant" | "medium" | "high" | "extra_high" | "pro";
   };
   browser: {
     sessionPrefix: string;
@@ -623,6 +625,11 @@ function expectEnum<T extends readonly string[]>(value: unknown, path: string, a
   return value as T[number];
 }
 
+function expectOptionalEnum<T extends readonly string[]>(value: unknown, path: string, allowed: T): T[number] | undefined {
+  if (value === undefined) return undefined;
+  return expectEnum(value, path, allowed);
+}
+
 function expectChatGptUrl(value: unknown, path: string): string {
   const url = expectString(value, path);
   try {
@@ -680,6 +687,8 @@ function validateOracleConfig(value: unknown): OracleConfig {
   const provider = expectEnum(defaults.provider, "defaults.provider", ORACLE_PROVIDERS);
   const preset = expectEnum(defaults.preset, "defaults.preset", PRESET_IDS);
   const grokMode = expectEnum(defaults.grokMode, "defaults.grokMode", GROK_MODES);
+  const chatgptModel = expectOptionalEnum(defaults.chatgptModel, "defaults.chatgptModel", ["sol", "5.5"] as const);
+  const chatgptEffort = expectOptionalEnum(defaults.chatgptEffort, "defaults.chatgptEffort", ["instant", "medium", "high", "extra_high", "pro"] as const);
 
   const browser = expectObject(root.browser, "browser");
   const auth = expectObject(root.auth, "auth");
@@ -714,6 +723,8 @@ function validateOracleConfig(value: unknown): OracleConfig {
       provider,
       preset,
       grokMode,
+      chatgptModel,
+      chatgptEffort,
     },
     browser: {
       sessionPrefix: expectString(browser.sessionPrefix, "browser.sessionPrefix"),

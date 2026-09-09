@@ -21,28 +21,10 @@ import { applyOracleJobCleanupWarnings, clearOracleJobCleanupState, transitionOr
 import { spawnDetachedNodeProcess, terminateTrackedProcess } from "../shared/process-helpers.mjs";
 import { getOracleJobsDir } from "../shared/state-path-helpers.mjs";
 import { extractArtifactLabels, FILE_LABEL_PATTERN_SOURCE, GENERIC_ARTIFACT_LABELS, parseSnapshotEntries, partitionStructuralArtifactCandidates } from "./artifact-heuristics.mjs";
-import {
-  buildAllowedChatGptOrigins,
-  deriveAssistantCompletionSignature,
-  matchesCompactIntelligenceControlLabel,
-  matchesCompactIntelligenceOpenerLabel,
-  matchesModelFamilyLabel,
-  matchesRequestedModelControlLabel,
-  requestedEffortLabel,
-  effortSelectionVisible,
-  snapshotCanSafelySkipModelConfiguration,
-  snapshotHasClosedCompactSelection,
-  snapshotHasModelConfigurationUi,
-  snapshotHasModelOpener,
-  snapshotHasUsableComposerControls,
-  snapshotStronglyMatchesRequestedModel,
-  snapshotWeaklyMatchesRequestedModel,
-  autoSwitchToThinkingSelectionVisible,
-  stripChatGptResponseChrome,
-} from "./chatgpt-ui-helpers.mjs";
+import { buildAllowedChatGptOrigins, deriveAssistantCompletionSignature, snapshotHasUsableComposerControls, stripChatGptResponseChrome } from "./chatgpt-ui-helpers.mjs";
 import { assistantSnapshotSlice, conversationIdFromUrl, nextStableValueState, providerSendAccepted, resolveStableConversationUrlCandidate, stripUrlQueryAndHash } from "./chatgpt-flow-helpers.mjs";
 import { normalizeLoginProbeResult } from "./auth-flow-helpers.mjs";
-import { assertNotKnownBrowserUserDataPath, scrubSweetCookieSafeStoragePasswordEnv, sweetCookieSafeStoragePasswordScrubbedEnv } from "../shared/browser-profile-helpers.mjs";
+import { assertNotKnownBrowserUserDataPath, isPersistentRuntimeProfile, scrubSweetCookieSafeStoragePasswordEnv, sweetCookieSafeStoragePasswordScrubbedEnv } from "../shared/browser-profile-helpers.mjs";
 import { createLease, listLeaseMetadata, readLeaseMetadata, releaseLease, withLock } from "./state-locks.mjs";
 
 const jobId = process.argv[2];
@@ -80,10 +62,6 @@ const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 90_000;
 const ARTIFACT_DOWNLOAD_MAX_ATTEMPTS = 2;
 const AGENT_BROWSER_CLOSE_TIMEOUT_MS = 10_000;
 const PROFILE_CLONE_TIMEOUT_MS = 120_000;
-const MODEL_CONFIGURATION_OPEN_TIMEOUT_MS = 45_000;
-const MODEL_CONFIGURATION_SETTLE_TIMEOUT_MS = 20_000;
-const MODEL_CONFIGURATION_SETTLE_POLL_MS = 250;
-const MODEL_CONFIGURATION_CLOSE_RETRY_MS = 1_000;
 const POST_SEND_SETTLE_MS = 15_000;
 const AGENT_BROWSER_BIN = [process.env.AGENT_BROWSER_PATH, "/opt/homebrew/bin/agent-browser", "/usr/local/bin/agent-browser"].find(
   (candidate) => typeof candidate === "string" && candidate && existsSync(candidate),
@@ -879,82 +857,8 @@ function findLastEntry(snapshot, predicate) {
   return undefined;
 }
 
-function matchesModelFamilyControl(candidate, family) {
-  return ["button", "radio", "menuitemradio"].includes(candidate.kind || "") && typeof candidate.label === "string" && matchesModelFamilyLabel(candidate.label, family) && !candidate.disabled;
-}
-
 function normalizeSnapshotLabel(value) {
   return String(value || "").replace(/\s+/g, " ").trim();
-}
-
-function snapshotHasLegacyEffortCombobox(snapshot) {
-  return Boolean(findEntry(snapshot, (candidate) => {
-    if (candidate.kind !== "combobox" || candidate.disabled) return false;
-    return /^(?:Thinking effort|Pro thinking effort)$/i.test(normalizeSnapshotLabel(candidate.label));
-  }));
-}
-
-function snapshotHasCompactIntelligenceMenuControls(snapshot) {
-  return Boolean(findEntry(snapshot, (candidate) => {
-    if (candidate.disabled) return false;
-    const label = normalizeSnapshotLabel(candidate.label);
-    return (candidate.kind === "menu" && /(?:Intelligence.*Instant.*Medium.*High.*Pro|^(?:Instant|Medium|High|Extra High|Pro(?: Standard| Extended)?)$)/i.test(label))
-      || (candidate.kind === "menuitemradio" && /^(?:Instant\s+[\d.]+s?|Medium(?:\s+5\s*[–-]\s*30s)?|High(?:\s+15\s*[–-]\s*60s)?|Extra High|Pro(?:\s+5\+\s*min|\s+Standard|\s+Extended)?)$/i.test(label));
-  }));
-}
-
-function matchesRequestedModelControl(candidate, selection, options = {}) {
-  if (!["button", "radio", "menuitemradio"].includes(candidate.kind || "") || typeof candidate.label !== "string" || candidate.disabled) return false;
-  if (candidate.kind === "button") {
-    if (/\bexpanded=true\b/.test(String(candidate.line || ""))) return false;
-    if (options.ignoreCompactTierButtons && /^(?:Instant(?:\s+[\d.]+s?)?|Medium|High|Extra High|Pro(?: Standard| Extended)?)$/i.test(candidate.label)) return false;
-    if (options.ignoreCompactOnlyButtons && /^(?:Medium|High|Extra High)$/i.test(candidate.label)) return false;
-  }
-  if (selection.modelFamily === "pro" && /^Pro(?:\s+Extended)?$/i.test(candidate.label)) return true;
-  return matchesRequestedModelControlLabel(candidate.label, selection);
-}
-
-function matchesModelConfigurationOpener(candidate) {
-  if (candidate.kind !== "button" || typeof candidate.label !== "string" || candidate.disabled) return false;
-  const label = String(candidate.label || "");
-  return candidate.label === "Model"
-    || candidate.label === "Model selector"
-    || matchesCompactIntelligenceOpenerLabel(label)
-    || /^(?:Light|Standard|Extended|Heavy)(?:, click to remove)?$/i.test(label)
-    || ["instant", "thinking", "pro"].some((family) => matchesModelFamilyLabel(label, /** @type {import("./chatgpt-ui-helpers.d.mts").OracleUiModelFamily} */ (family)))
-    || /^(?:(?:Light|Standard|Extended|Heavy) )?Thinking(?:, click to remove)?$/i.test(label)
-    || /^(?:(?:Light|Standard|Extended|Heavy) )?Pro(?:, click to remove)?$/i.test(label);
-}
-
-function canUseOpenModelMenuForSelection(snapshot, selection) {
-  if (selection.modelFamily !== "instant" || selection.autoSwitchToThinking === true) return false;
-  return Boolean(findEntry(
-    snapshot,
-    (candidate) => candidate.kind === "menuitemradio" && matchesModelFamilyControl(candidate, selection.modelFamily),
-  ));
-}
-
-function composerControlsVisible(snapshot, job = currentJob) {
-  const labels = labelsForJob(job);
-  const entries = parseSnapshotEntries(snapshot);
-  const hasComposer = isGrokJob(job)
-    ? entries.some((entry) => !entry.disabled && ((entry.kind === "textbox" && entry.label === labels.composer) || /editable/.test(String(entry.line || ""))))
-    : entries.some((entry) => entry.kind === "textbox" && entry.label === labels.composer && !entry.disabled);
-  const hasAddFiles = entries.some(
-    (entry) => entry.kind === "button" && entry.label === labels.addFiles && !entry.disabled,
-  );
-  return hasComposer && hasAddFiles;
-}
-
-async function clickAutoSwitchToThinkingControl(job) {
-  const snapshot = await snapshotText(job);
-  const entry = findEntry(
-    snapshot,
-    (candidate) => ["button", "switch"].includes(candidate.kind || "") && typeof candidate.label === "string" && candidate.label.startsWith(CHATGPT_LABELS.autoSwitchToThinking) && !candidate.disabled,
-  );
-  if (!entry) throw new Error(`Could not find ${CHATGPT_LABELS.autoSwitchToThinking} control`);
-  await clickRef(job, entry.ref);
-  return entry;
 }
 
 async function clickRef(job, ref) {
@@ -977,52 +881,6 @@ async function maybeClickLabeledEntry(job, label, options = {}) {
   const entry = (options.last ? findLastEntry : findEntry)(
     snapshot,
     (candidate) => candidate.label === label && (!options.kind || candidate.kind === options.kind) && !candidate.disabled,
-  );
-  if (!entry) return false;
-  await clickRef(job, entry.ref);
-  return true;
-}
-
-async function openEffortDropdown(job) {
-  let snapshot = await snapshotText(job);
-  if (job.selection?.modelFamily === "pro") {
-    let proEffortEntry = findEntry(
-      snapshot,
-      (candidate) => candidate.kind === "menuitem" && candidate.label === "Pro effort options" && !candidate.disabled,
-    );
-    if (!proEffortEntry) {
-      const opener = findEntry(snapshot, matchesModelConfigurationOpener);
-      if (opener) {
-        await clickRef(job, opener.ref);
-        await agentBrowser(job, "wait", "500");
-        snapshot = await snapshotText(job);
-        proEffortEntry = findEntry(
-          snapshot,
-          (candidate) => candidate.kind === "menuitem" && candidate.label === "Pro effort options" && !candidate.disabled,
-        );
-      }
-    }
-    if (proEffortEntry) {
-      try {
-        await clickRef(job, proEffortEntry.ref);
-        return true;
-      } catch {
-        // Fall through to DOM click. ChatGPT's tiny trailing Pro effort icon can
-        // be covered at the accessibility click point by the parent Pro row.
-      }
-    }
-    const clicked = await evalPage(job, toJsonScript(`
-      const el = document.querySelector('[aria-label="Pro effort options"], [data-composer-intelligence-pro-effort-action]');
-      if (!el) return false;
-      el.click();
-      return true;
-    `));
-    if (clicked) return true;
-  }
-  const effortLabels = new Set(["Light", "Standard", "Extended", "Heavy"]);
-  const entry = findEntry(
-    snapshot,
-    (candidate) => candidate.kind === "combobox" && candidate.value && effortLabels.has(candidate.value) && !candidate.disabled,
   );
   if (!entry) return false;
   await clickRef(job, entry.ref);
@@ -1053,6 +911,10 @@ async function setComposerText(job, text) {
 function classifyChatPage({ job, url, snapshot, body, probe }) {
   if (isGrokJob(job)) return classifyGrokPage({ url, snapshot, body });
   const text = `${snapshot}\n${body}`;
+  // Managed-challenge loop marker: the page silently cycles "Verification
+  // successful. Waiting…" while the challenge never actually passes. This must
+  // classify as a challenge, not drift into login-required via probe 401s.
+  const managedChallenge = /_cf_chl_opt|cdn-cgi\/challenge-platform/i.test(text);
   const challengePatterns = [
     /just a moment/i,
     /verify you are human/i,
@@ -1405,242 +1267,132 @@ async function waitForSendAccepted(job, beforeSend, options = {}) {
   return false;
 }
 
-async function dismissProFeedbackModal(job, snapshot) {
+const COMPOSER_NON_EFFORT_BUTTONS = /^(Add files and more|Start dictation|Send prompt|Temporary chat)$/i;
+
+function findComposerEffortButton(snapshot, composerLabel) {
   const entries = parseSnapshotEntries(snapshot);
-  const hasProFeedback = entries.some((entry) => entry.kind === "heading" && entry.label === "Pro feedback" && !entry.disabled);
-  if (!hasProFeedback) return false;
-  const close = entries.find((entry) => entry.kind === "button" && entry.label === CHATGPT_LABELS.close && !entry.disabled);
-  if (close) {
-    await clickRef(job, close.ref).catch(() => undefined);
-    await agentBrowser(job, "wait", "500");
-    if (!(await pageText(job).catch(() => "")).includes("Pro feedback")) return true;
+  const composerIndex = entries.findIndex((entry) => entry.kind === "textbox" && entry.label === composerLabel);
+  if (composerIndex === -1) return undefined;
+  for (let i = composerIndex + 1; i < entries.length && i <= composerIndex + 4; i += 1) {
+    const entry = entries[i];
+    if (entry.kind === "button" && !entry.disabled && !COMPOSER_NON_EFFORT_BUTTONS.test(String(entry.label || ""))) return entry;
   }
-  await agentBrowser(job, "press", "Escape").catch(() => undefined);
-  await agentBrowser(job, "wait", "500");
-  if (!(await pageText(job).catch(() => "")).includes("Pro feedback")) return true;
-
-  const dismissed = await evalPage(job, toJsonScript(`
-    const dialogText = document.body.innerText || '';
-    if (!/Pro feedback/.test(dialogText)) return false;
-    const button = Array.from(document.querySelectorAll('button'))
-      .find((candidate) => (candidate.getAttribute('aria-label') || candidate.textContent || '').trim() === 'Close');
-    if (!button) return false;
-    button.click();
-    return true;
-  `));
-  if (dismissed) await agentBrowser(job, "wait", "500");
-  return Boolean(dismissed);
+  return undefined;
 }
 
-async function openModelConfiguration(job) {
-  const timeoutAt = Date.now() + MODEL_CONFIGURATION_OPEN_TIMEOUT_MS;
-  let lastSnapshot = "";
+async function configureThinkingEffortMenu(job, openerEntry) {
+  // Selection comes straight from oracle.json knobs (ChatGPT UI vocabulary):
+  // defaults.chatgptModel = "sol" | "5.5", defaults.chatgptEffort =
+  // "instant" | "medium" | "high" | "extra_high" | "pro". Confirmed slider
+  // ladder: 0=Instant, 1=Medium, 2=High, 3=Extra High, 4=Pro. Both models
+  // share the ladder; the popover header combines them (e.g. "5.5 Extra High").
+  const uiModel = job.config?.defaults?.chatgptModel;
+  const uiEffort = job.config?.defaults?.chatgptEffort;
+  const EFFORT_RUNGS = { instant: 0, medium: 1, high: 2, extra_high: 3, pro: 4 };
+  const RUNG_LABELS = { 0: "Instant", 1: "Medium", 2: "High", 3: "Extra High", 4: "Pro" };
+  const sliderTarget = EFFORT_RUNGS[uiEffort];
+  const expectedLabel = RUNG_LABELS[sliderTarget];
+  const wantProClass = uiModel === "sol";
+  const menuItemSelected = (label) => (candidate) => candidate.kind === "menuitem" && candidate.label === label && !candidate.disabled;
+  const clickAndSnap = async (entry, waitMs = 900) => {
+    await clickRef(job, entry.ref);
+    await agentBrowser(job, "wait", String(waitMs));
+    return snapshotText(job);
+  };
 
-  while (Date.now() < timeoutAt) {
-    const initialSnapshot = await snapshotText(job);
-    lastSnapshot = initialSnapshot;
-    throwIfProviderTransientError(job, initialSnapshot, "opening model configuration");
-    if (snapshotHasModelConfigurationUi(initialSnapshot)) return initialSnapshot;
-    if (await dismissProFeedbackModal(job, initialSnapshot)) continue;
-
-    for (const predicate of [matchesModelConfigurationOpener]) {
-      const snapshot = await snapshotText(job);
-      lastSnapshot = snapshot;
-      const entry = findEntry(snapshot, predicate);
-      if (!entry) continue;
-      await clickRef(job, entry.ref);
-      await agentBrowser(job, "wait", "800");
-      const after = await snapshotText(job);
-      lastSnapshot = after;
-      throwIfProviderTransientError(job, after, "opening model configuration");
-      if (snapshotHasModelConfigurationUi(after)) return after;
-      if (canUseOpenModelMenuForSelection(after, job.selection)) return after;
-
-      const configureEntry = findEntry(
-        after,
-        (candidate) => candidate.kind === "menuitem" && candidate.label === CHATGPT_LABELS.configure && !candidate.disabled,
-      );
-
-      if (configureEntry) {
-        await clickRef(job, configureEntry.ref);
-        await agentBrowser(job, "wait", "1200");
-        const postConfigure = await snapshotText(job);
-        lastSnapshot = postConfigure;
-        throwIfProviderTransientError(job, postConfigure, "opening model configuration");
-        if (snapshotHasModelConfigurationUi(postConfigure)) return postConfigure;
-        if (canUseOpenModelMenuForSelection(postConfigure, job.selection)) return postConfigure;
-      }
-    }
-
-    if (composerControlsVisible(lastSnapshot, job) && !snapshotHasModelOpener(lastSnapshot)) {
-      await agentBrowser(job, "wait", "1000");
-      continue;
-    }
-    await agentBrowser(job, "wait", "500");
-  }
-
-  throw new Error("Could not open model configuration UI");
-}
-
-async function waitForModelConfigurationToSettle(job, options = {}) {
-  const deadline = Date.now() + MODEL_CONFIGURATION_SETTLE_TIMEOUT_MS;
-  let lastCloseAttemptAt = 0;
-  let fallbackLogged = false;
-  let lastSnapshot = "";
-
-  while (Date.now() < deadline) {
-    const snapshot = await snapshotText(job);
-    lastSnapshot = snapshot;
-    const configurationUiVisible = snapshotHasModelConfigurationUi(snapshot);
-
-    if (!configurationUiVisible) {
-      if (snapshotWeaklyMatchesRequestedModel(snapshot, job.selection)) return;
-      if (options.stronglyVerified) {
-        if (!fallbackLogged) {
-          fallbackLogged = true;
-          await log(`Model configuration closed after strong in-dialog verification for family=${job.selection.modelFamily} effort=${job.selection?.effort || "(none)"}`);
-        }
-        return;
-      }
-    }
-
-    if (!configurationUiVisible && composerControlsVisible(snapshot) && options.stronglyVerified) {
-      if (!fallbackLogged) {
-        fallbackLogged = true;
-        await log(`Composer became usable after strong in-dialog verification for family=${job.selection.modelFamily} effort=${job.selection?.effort || "(none)"}`);
-      }
+  try {
+    // Already at target? The button label proves the current rung.
+    if (String(openerEntry.label || "").trim() === expectedLabel) {
+      await log(`Composer effort button already "${openerEntry.label}"; skipping thinking-effort menu configuration`);
       return;
     }
 
-    if (Date.now() - lastCloseAttemptAt >= MODEL_CONFIGURATION_CLOSE_RETRY_MS) {
-      lastCloseAttemptAt = Date.now();
-      if (!(await maybeClickLabeledEntry(job, CHATGPT_LABELS.close, { kind: "button" }))) {
+    let snapshot = await clickAndSnap(openerEntry);
+    const selectModel = findEntry(snapshot, menuItemSelected("Select model"));
+    if (selectModel) {
+      snapshot = await clickAndSnap(selectModel);
+      const radios = parseSnapshotEntries(snapshot).filter((entry) => entry.kind === "menuitemradio" && !entry.disabled);
+      const target = radios.find((r) => /sol|\bpro\b/i.test(String(r.label || "")) === wantProClass) || radios[0];
+      if (target && !radios.some((r) => /sol|\bpro\b/i.test(String(r.label || "")) === wantProClass)) {
+        await log(`No model radio matched the ${wantProClass ? "sol" : "5.5"} class; falling back to "${target.label}"`);
+      }
+      if (target) {
+        const checked = /checked=true/.test(String(target.line || ""));
+        if (!checked) snapshot = await clickAndSnap(target);
         await agentBrowser(job, "press", "Escape").catch(() => undefined);
+        await agentBrowser(job, "wait", "600");
       }
     }
 
-    await sleep(MODEL_CONFIGURATION_SETTLE_POLL_MS);
-  }
+    snapshot = await snapshotText(job);
+    const opener = findComposerEffortButton(snapshot, labelsForJob(job).composer);
+    if (!opener) throw new Error("Thinking-effort menu: effort button disappeared after model selection");
+    snapshot = await clickAndSnap(opener);
+    const power = findEntry(snapshot, menuItemSelected("Power"));
+    if (!power) throw new Error("Thinking-effort menu: no Power slider item");
+    snapshot = await clickAndSnap(power, 600);
+    const slider = findEntry(snapshot, (candidate) => candidate.kind === "slider");
+    if (!slider) throw new Error("Thinking-effort menu: no effort slider");
+    const sliderValue = async () => {
+      const snap = await snapshotText(job);
+      const entry = findEntry(snap, (candidate) => candidate.kind === "slider");
+      const m = /:\s*(-?\d+)\s*$/.exec(String(entry?.line || ""));
+      return m ? Number(m[1]) : NaN;
+    };
+    await agentBrowser(job, "focus", `@${slider.ref}`).catch(() => undefined);
+    let now = NaN;
+    let settle = 0;
+    while (!Number.isFinite(now) && settle++ < 6) {
+      await agentBrowser(job, "wait", "500");
+      now = await sliderValue();
+    }
+    let guard = 0;
+    while (Number.isFinite(now) && now !== sliderTarget && guard++ < 10) {
+      await agentBrowser(job, "press", now < sliderTarget ? "ArrowRight" : "ArrowLeft");
+      await agentBrowser(job, "wait", "300");
+      now = await sliderValue();
+    }
+    if (!Number.isFinite(now)) throw new Error("Thinking-effort menu: effort slider value unreadable");
+    await log(`Thinking-effort slider set to ${now} (target ${sliderTarget})`);
+    await agentBrowser(job, "press", "Escape").catch(() => undefined);
+    await agentBrowser(job, "wait", "700");
 
-  if (options.stronglyVerified && lastSnapshot && !snapshotHasModelConfigurationUi(lastSnapshot)) {
-    await log(`Model configuration closed only after settle-timeout for family=${job.selection.modelFamily} effort=${job.selection?.effort || "(none)"}`);
-    return;
+    snapshot = await snapshotText(job);
+    const finalButton = findComposerEffortButton(snapshot, labelsForJob(job).composer);
+    await log(`Composer effort button after configuration: "${finalButton?.label || "(not found)"}"`);
+    const finalLabel = String(finalButton?.label || "").trim();
+    const labelOk = uiModel === "5.5" ? finalLabel.includes(expectedLabel) : finalLabel === expectedLabel;
+    if (!labelOk) {
+      throw new Error(`Thinking-effort menu: expected "${expectedLabel}" effort button, found "${finalLabel || "none"}"`);
+    }
+  } catch (error) {
+    await captureDiagnostics(job, "thinking-effort-menu-failed");
+    throw error;
   }
-
-  throw new Error(`Could not verify requested model settings after configuration for ${job.selection.modelFamily}`);
 }
-
 async function configureModel(job) {
   if (isGrokJob(job)) return configureGrokModel(job);
-  const initialSnapshot = await snapshotText(job);
-  if (snapshotCanSafelySkipModelConfiguration(initialSnapshot, job.selection)) {
-    await log(`Model already appears configured for family=${job.selection.modelFamily} effort=${job.selection?.effort || "(none)"}; skipping reconfiguration`);
-    return;
+  const uiModel = job.config?.defaults?.chatgptModel;
+  const uiEffort = job.config?.defaults?.chatgptEffort;
+  if (!uiModel || !uiEffort) {
+    throw new Error(
+      "ChatGPT selection requires defaults.chatgptModel (\"sol\"|\"5.5\") and " +
+        "defaults.chatgptEffort (\"instant\"|\"medium\"|\"high\"|\"extra_high\"|\"pro\") in oracle.json.",
+    );
   }
-
-  await log(`Configuring model family=${job.selection.modelFamily} effort=${job.selection?.effort || "(none)"}`);
-  let familySnapshot = await openModelConfiguration(job);
-  let verificationSnapshot = familySnapshot;
-
-  const alreadyConfiguredInUi = snapshotStronglyMatchesRequestedModel(familySnapshot, job.selection);
-  const legacyEffortComboboxVisible = snapshotHasLegacyEffortCombobox(familySnapshot);
-  const familyAlreadySelectedInUi = !alreadyConfiguredInUi && legacyEffortComboboxVisible && snapshotWeaklyMatchesRequestedModel(familySnapshot, job.selection);
-  const controlOptions = {
-    ignoreCompactTierButtons: snapshotHasCompactIntelligenceMenuControls(familySnapshot),
-    ignoreCompactOnlyButtons: legacyEffortComboboxVisible,
-  };
-  let familyEntry = alreadyConfiguredInUi || familyAlreadySelectedInUi
-    ? undefined
-    : findEntry(familySnapshot, (candidate) => matchesRequestedModelControl(candidate, job.selection, controlOptions));
-  if (alreadyConfiguredInUi) {
-    await log("Model configuration UI opened with requested settings already selected");
-  } else if (familyAlreadySelectedInUi) {
-    await log("Model family already appears selected; verifying effort-specific settings");
-  } else if (!familyEntry) {
-    throw new Error(`Could not find model family control for ${job.selection.modelFamily}`);
-  }
-
-  let compactSelectionVerifiedAfterClick = false;
-  if (!alreadyConfiguredInUi && !familyAlreadySelectedInUi && familyEntry) {
-    const clickedCompactControl = matchesCompactIntelligenceControlLabel(familyEntry.label);
-    await clickRef(job, familyEntry.ref);
-    await agentBrowser(job, "wait", "800");
-    familySnapshot = await snapshotText(job);
-    verificationSnapshot = familySnapshot;
-    compactSelectionVerifiedAfterClick = clickedCompactControl && snapshotHasClosedCompactSelection(familySnapshot, job.selection);
-    if (compactSelectionVerifiedAfterClick) {
-      await log(`Verified compact ChatGPT selection after menu close for family=${job.selection.modelFamily} effort=${job.selection?.effort || "(none)"}`);
+  await log(`Configuring model ${uiModel} effort=${uiEffort}`);
+  let effortMenuOpener = findComposerEffortButton(await snapshotText(job), labelsForJob(job).composer);
+  if (!effortMenuOpener) {
+    // Composer may still be hydrating right after auth-ready; poll briefly.
+    const openerDeadline = Date.now() + 15_000;
+    while (!effortMenuOpener && Date.now() < openerDeadline) {
+      await agentBrowser(job, "wait", "1000");
+      effortMenuOpener = findComposerEffortButton(await snapshotText(job), labelsForJob(job).composer);
     }
-    const postClickControlOptions = {
-      ignoreCompactTierButtons: snapshotHasCompactIntelligenceMenuControls(familySnapshot),
-      ignoreCompactOnlyButtons: snapshotHasLegacyEffortCombobox(familySnapshot),
-    };
-    familyEntry = findEntry(familySnapshot, (candidate) => matchesRequestedModelControl(candidate, job.selection, postClickControlOptions));
-    if (!compactSelectionVerifiedAfterClick && !familyEntry && !snapshotStronglyMatchesRequestedModel(familySnapshot, job.selection)) {
-      throw new Error(`Requested model family did not remain selected: ${job.selection.modelFamily}`);
-    }
+    if (!effortMenuOpener) throw new Error("No composer effort button found — the ChatGPT composer UI may have changed.");
   }
-
-  if ((job.selection.modelFamily === "thinking" || job.selection.modelFamily === "pro") && !compactSelectionVerifiedAfterClick) {
-    const effortLabel = requestedEffortLabel(job.selection);
-    if (effortLabel && !effortSelectionVisible(familySnapshot, effortLabel)) {
-      const opened = await openEffortDropdown(job);
-      if (!opened) {
-        // Current ChatGPT Pro menus sometimes expose only undifferentiated "Pro" with no Standard/Extended rows.
-        const afterOpenAttempt = await snapshotText(job);
-        if (job.selection.modelFamily === "pro" && snapshotStronglyMatchesRequestedModel(afterOpenAttempt, job.selection)) {
-          await log(`Pro effort dropdown unavailable for ${effortLabel}; accepting undifferentiated Pro selection`);
-          verificationSnapshot = afterOpenAttempt;
-          familySnapshot = afterOpenAttempt;
-        } else {
-          throw new Error(`Could not open effort dropdown for requested effort: ${effortLabel}`);
-        }
-      } else {
-        await agentBrowser(job, "wait", "300");
-        if (job.selection.modelFamily === "pro" && await maybeClickLabeledEntry(job, `Pro ${effortLabel}`, { kind: "menuitemradio" })) {
-          // Current ChatGPT exposes Pro effort choices as nested menu radio items.
-        } else {
-          await clickLabeledEntry(job, effortLabel, { kind: "option" });
-        }
-        await agentBrowser(job, "wait", "400");
-        const effortSnapshot = await snapshotText(job);
-        verificationSnapshot = effortSnapshot;
-        const selectedEffort = findEntry(
-          effortSnapshot,
-          (candidate) => candidate.kind === "combobox" && candidate.value === effortLabel && !candidate.disabled,
-        );
-        if (!selectedEffort && !effortSelectionVisible(effortSnapshot, effortLabel)) {
-          throw new Error(`Requested effort did not remain selected: ${effortLabel}`);
-        }
-        familySnapshot = effortSnapshot;
-      }
-    }
-  }
-
-  if (job.selection.modelFamily === "instant") {
-    const desiredAutoSwitchState = job.selection.autoSwitchToThinking === true;
-    const currentAutoSwitchState = autoSwitchToThinkingSelectionVisible(familySnapshot);
-    const compactInstantAlreadyVerified = compactSelectionVerifiedAfterClick
-      || (desiredAutoSwitchState && currentAutoSwitchState === undefined && snapshotStronglyMatchesRequestedModel(familySnapshot, job.selection));
-    if (!compactInstantAlreadyVerified && currentAutoSwitchState !== desiredAutoSwitchState && (desiredAutoSwitchState || currentAutoSwitchState === true)) {
-      await clickAutoSwitchToThinkingControl(job);
-      await agentBrowser(job, "wait", "400");
-      verificationSnapshot = await snapshotText(job);
-      familySnapshot = verificationSnapshot;
-    }
-  }
-
-  const stronglyVerified = compactSelectionVerifiedAfterClick || snapshotStronglyMatchesRequestedModel(verificationSnapshot, job.selection);
-  if (!stronglyVerified) {
-    throw new Error(`Could not verify requested model settings in configuration UI for ${job.selection.modelFamily}`);
-  }
-
-  if (!(await maybeClickLabeledEntry(job, CHATGPT_LABELS.close, { kind: "button" }))) {
-    await agentBrowser(job, "press", "Escape").catch(() => undefined);
-  }
-  await waitForModelConfigurationToSettle(job, { stronglyVerified });
+  await configureThinkingEffortMenu(job, effortMenuOpener);
 }
-
 async function configureGrokModel(job) {
   const snapshot = await snapshotText(job);
   if (/\bHeavy\b/.test(snapshot) && !snapshot.includes(`button "${GROK_LABELS.modelSelect}"`)) {

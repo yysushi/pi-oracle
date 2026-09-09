@@ -297,21 +297,6 @@ function compactSelectionFromEntry(entry, entries = [], options = {}) {
   return undefined;
 }
 
-export function matchesCompactIntelligenceControlLabel(label) {
-  return Boolean(parseCompactIntelligenceSelection(label) || parseBareProCompactSelection(label));
-}
-
-export function snapshotHasClosedCompactSelection(snapshot, selection) {
-  /** @type {SnapshotEntry[]} */
-  const entries = parseSnapshotEntries(snapshot);
-  if (hasRemovableComposerModelChip(entries) || hasLegacyEffortCombobox(entries) || hasCompactIntelligenceMenuContext(entries)) return false;
-  return entries.some((entry) => {
-    if (entry.kind !== "button" || entry.disabled) return false;
-    const compactSelection = compactSelectionFromEntry(entry, entries, { allowClosedButtons: true });
-    return compactSelectionMatchesRequestedInSnapshot(snapshot, selection, compactSelection);
-  });
-}
-
 function compactSelectionMatchesRequested(selection, compactSelection) {
   if (!compactSelection || compactSelection.modelFamily !== selection.modelFamily) return false;
 
@@ -366,16 +351,6 @@ function detectCompactIntelligenceSelection(entries) {
     return compactSelection;
   }
   return undefined;
-}
-
-export function matchesRequestedModelControlLabel(label, selection) {
-  const compactSelection = parseCompactIntelligenceSelection(label) || parseBareProCompactSelection(label);
-  if (compactSelection) return compactSelectionMatchesRequested(selection, compactSelection);
-  return matchesModelFamilyLabel(label, selection.modelFamily);
-}
-
-export function matchesCompactIntelligenceOpenerLabel(label) {
-  return COMPACT_INTELLIGENCE_OPENER_PATTERN.test(normalizeChipLabel(label));
 }
 
 function detectComposerChipSelection(entries) {
@@ -466,14 +441,6 @@ export function effortSelectionVisible(snapshot, effortLabel) {
  * @param {string} snapshot
  * @returns {boolean}
  */
-export function thinkingChipVisible(snapshot) {
-  return /button "(?:Light|Standard|Extended|Heavy)(?: thinking)?(?:, click to remove)?"/i.test(snapshot);
-}
-
-/**
- * @param {string} snapshot
- * @returns {boolean}
- */
 export function snapshotHasModelConfigurationUi(snapshot) {
   /** @type {SnapshotEntry[]} */
   const entries = parseSnapshotEntries(snapshot);
@@ -522,26 +489,6 @@ export function snapshotHasUsableComposerControls(snapshot) {
  * @param {string} snapshot
  * @returns {boolean}
  */
-export function snapshotHasModelOpener(snapshot) {
-  /** @type {SnapshotEntry[]} */
-  const entries = parseSnapshotEntries(snapshot);
-  return entries.some((entry) => {
-    if (entry.disabled || entry.kind !== "button" || typeof entry.label !== "string") return false;
-    const label = normalizeChipLabel(entry.label);
-    return label === "Model"
-      || label === "Model selector"
-      || COMPACT_INTELLIGENCE_OPENER_PATTERN.test(label)
-      || EFFORT_LABELS.has(label)
-      || ["instant", "thinking", "pro"].some((family) => matchesModelFamilyLabel(label, /** @type {OracleUiModelFamily} */ (family)))
-      || THINKING_CHIP_PATTERN.test(label)
-      || PRO_CHIP_PATTERN.test(label);
-  });
-}
-
-/**
- * @param {string} snapshot
- * @returns {boolean | undefined}
- */
 export function autoSwitchToThinkingSelectionVisible(snapshot) {
   /** @type {SnapshotEntry[]} */
   const entries = parseSnapshotEntries(snapshot);
@@ -560,23 +507,6 @@ export function autoSwitchToThinkingSelectionVisible(snapshot) {
   }
 
   return foundControl ? false : undefined;
-}
-
-/**
- * @param {string} snapshot
- * @param {OracleUiSelection} selection
- * @returns {boolean}
- */
-export function snapshotCanSafelySkipModelConfiguration(snapshot, selection) {
-  if (!snapshotStronglyMatchesRequestedModel(snapshot, selection)) return false;
-  const hasBareProPill = selection.modelFamily === "pro" && parseSnapshotEntries(snapshot).some(
-    (entry) => entry.kind === "button" && !entry.disabled && normalizeChipLabel(entry.label) === "Pro",
-  );
-  if (hasBareProPill && !snapshotHasModelConfigurationUi(snapshot)) return false;
-  if (selection.modelFamily === "instant" && selection.autoSwitchToThinking) {
-    return autoSwitchToThinkingSelectionVisible(snapshot) === true;
-  }
-  return true;
 }
 
 /**
